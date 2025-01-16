@@ -1,0 +1,11 @@
+{
+    "include": ["src/**/*", "__mocks__"],
+    "compilerOptions": {
+        "esModuleInterop": true,
+        "jsx": "react-jsx",
+        "moduleResolution": "node",
+        "target": "ESNext",
+        "allowJs": true
+    }
+}
+  
