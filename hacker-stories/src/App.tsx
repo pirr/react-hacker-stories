@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useReducer, useCallback, ChangeEvent, FormEvent, ReactNode, HTMLAttributes, ButtonHTMLAttributes, ReactElement } from 'react'
+import React, { useEffect, useState, useRef, useReducer, useCallback, ChangeEvent, FormEvent, ReactNode, HTMLAttributes, ButtonHTMLAttributes, ReactElement, RefObject } from 'react'
 import axios from 'axios';
 import cs from 'classnames';
 import styled from 'styled-components';
@@ -7,8 +7,6 @@ import styles from './App.module.css';
 import {ReactComponent as Check} from './check.svg'
 import {ReactComponent as ArrowUp} from './up-arrow-svgrepo-com.svg'
 import {ReactComponent as ArrowDown} from './down-arrow-svgrepo-com.svg'
-import { url } from 'inspector';
-import { get } from 'http';
 
 const StyledContainer = styled.div`
   height: 100vw;
@@ -176,7 +174,17 @@ interface StoriesFetchInitAction {
 
 interface StoriesFetchSuccessAction {
   type: 'STORIES_FETCH_SUCCESS';
-  payload: Stories;
+  payload: {
+    list: Stories,
+    page: number,
+  };
+}
+
+interface StoriesChangePageAction {
+  type: 'STORIES_CHANGE_PAGE';
+  payload: {
+    page: number,
+  }
 }
 
 interface StoriesFetchFailureAction {
@@ -190,6 +198,7 @@ interface StoriesRemoveAction {
 
 type StoriesState = {
   data: Stories;
+  page: number;
   isLoading: boolean;
   isError: boolean;
 };
@@ -197,6 +206,7 @@ type StoriesState = {
 type StoriesAction = 
   | StoriesFetchInitAction
   | StoriesFetchSuccessAction
+  | StoriesChangePageAction
   | StoriesFetchFailureAction
   | StoriesRemoveAction
 
@@ -277,7 +287,7 @@ type SearchFormPrpops = {
 
 const SearchForm =
   ({
-    searchTerm: initialSearchTerm,
+    searchTerm,
     onSearchInput,
     onSearchSubmit,
   }: SearchFormPrpops) => {
@@ -295,9 +305,9 @@ const SearchForm =
         <Search
           id="search"
           onInputChange={onSearchInput}
-          searchTerm={initialSearchTerm}
+          searchTerm={searchTerm}
         />
-        <StyledButtonLarge type="submit" disabled={!initialSearchTerm}>
+        <StyledButtonLarge type="submit" disabled={!searchTerm}>
           Submit
         </StyledButtonLarge>
       </StyledSearchForm>
@@ -345,7 +355,7 @@ const List = ({list, onRemoveItem}: ListProps) => {
       </StyledList>
       {Array.isArray(sortedList) && sortedList.map((item) => (
         <Item 
-          key={item.objectID} 
+          key={item.objectID}
           item={item}
           onRemoveItem={onRemoveItem}
         />
@@ -430,8 +440,17 @@ const storiesReducer = (
         ...state,
         isLoading: false,
         isError: false,
-        data: action.payload,
+        data:
+          action.payload.page === 0
+          ? action.payload.list
+          : state.data.concat(action.payload.list),
+        page: action.payload.page,
       };
+    case 'STORIES_CHANGE_PAGE':
+      return {
+        ...state,
+        page: action.payload.page,
+      }
     case 'STORIES_FETCH_FAILURE':
       return {
         ...state,
@@ -458,21 +477,35 @@ const getSumComment = (stories: Stories) => {
   );
 };
 
-const API_ENDPOINT = 'https://hn.algolia.com/api/v1/search?query=';
+const API_BASE = 'https://hn.algolia.com/api/v1';
+const API_SEARCH = '/search';
+const PARAM_SEARCH = 'query=';
+const PARAM_PAGE = 'page=';
 
-const extractSearchTerm = (url: string) => url.replace(API_ENDPOINT, '');
-const getLastSearches = (urls: string[]) => urls.filter((url, index) => urls.lastIndexOf(url) === index).slice(-6, -1).map(extractSearchTerm);
-const getUrl = (searchTerm: string) => `${API_ENDPOINT}${searchTerm}`;
+const extractSearchTerm = (url: string) => url
+  .substring(url.lastIndexOf('?') + 1, url.lastIndexOf('&'))
+  .replace(PARAM_SEARCH, '');
+  
+const getLastSearches = (urls: string[]) => {
+  const searchTerms = urls.map(extractSearchTerm);
+  return searchTerms
+    .filter((searchTerm, index) => searchTerms.lastIndexOf(searchTerm) === index)
+    .slice(-6, -1);
+}
+
+const getUrl = (searchTerm: string, page: number) => 
+  `${API_BASE}${API_SEARCH}?${PARAM_SEARCH}${searchTerm}&${PARAM_PAGE}${page}`;
 
 const App = () => {
 
   const [searchTerm, setSearchTerm] = useSemiPersistentState('search', 'React');
-  const [urls, setUrls] = useState([getUrl(searchTerm)]);
-
+  const [urls, setUrls] = useState([getUrl(searchTerm, 0)]);
+  const observerTarget = useRef(null);
+  const [isIntersecting, setIsIntersecting] = useState(false);
   
   const [stories, dispatchStories] = useReducer(
     storiesReducer,
-    {data: [], isLoading: false, isError: false},
+    {data: [], page: 0, isLoading: false, isError: false},
   );
 
   const sumComments = getSumComment(stories.data);
@@ -481,24 +514,39 @@ const App = () => {
     setSearchTerm(event.target.value);
   };
 
-  const handleLastSearch = (searchTerm: string) => {
-    setSearchTerm(searchTerm);
-    handleSearch(searchTerm);
+  const handleLastSearch = (lastSearchTerm: string) => {
+    setSearchTerm(lastSearchTerm);
+    handleSearch(lastSearchTerm, 0);
   }
 
   const lastSearches = getLastSearches(urls);
 
   const handleSearchSubmit = (event: FormEvent<HTMLFormElement>) => {
-    handleSearch(searchTerm);
+    handleSearch(searchTerm, 0);
 
     event.preventDefault();
   };
 
-  const handleSearch = (searchTerm: string) => {
-    const url = getUrl(searchTerm);
+  const handleSearch = (searchTerm: string, page: number) => {
+    const url = getUrl(searchTerm, page);
     setUrls(urls.concat(url));
   }
-  
+
+  const handleMore = useCallback(() => {
+    const lastUrl = urls[urls.length - 1];
+    const searchTerm = extractSearchTerm(lastUrl);
+    handleSearch(searchTerm, stories.page);
+  }, [stories.page])
+
+  const increasePage = () => {
+    dispatchStories({
+      type: 'STORIES_CHANGE_PAGE', 
+      payload: {
+        page: stories.page + 1,
+      },
+    });
+  };
+
   const handleRemoveStory = (item: Story) => {
     dispatchStories({
       type: 'REMOVE_STORY',
@@ -507,6 +555,10 @@ const App = () => {
   };
 
   const handleFetchStories = useCallback(async () => {
+
+    if (stories.isLoading) {
+      return;
+    }
     dispatchStories({type: 'STORIES_FETCH_INIT'});
 
     try {
@@ -515,7 +567,10 @@ const App = () => {
 
       dispatchStories({
         type: 'STORIES_FETCH_SUCCESS',
-        payload: result.data.hits,
+        payload: {
+          list: result.data.hits,
+          page: result.data.page,
+        },
       });
     } catch {
       dispatchStories({type: 'STORIES_FETCH_FAILURE'});
@@ -524,9 +579,38 @@ const App = () => {
   }, [urls])
 
   useEffect(() => {
-    handleFetchStories();    
+    handleFetchStories();
   }, [handleFetchStories]);
 
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setIsIntersecting(entry.isIntersecting);
+      }, {threshold: 1}
+    );
+
+    if (observerTarget.current && !stories.isLoading) {
+      observer.observe(observerTarget.current);
+    }
+
+    return () => {
+      if (observerTarget.current) {
+        observer.disconnect();
+      }
+    }
+  }, [isIntersecting, stories.isLoading, stories.page]);
+
+  useEffect(() => {
+    if (isIntersecting) {
+      increasePage();
+    }
+  }, [isIntersecting]);
+
+  useEffect(() => {
+    if (stories.page !== 0) {
+      handleMore();
+    }
+  }, [handleMore, stories.page]);
 
   return (
     <StyledContainer>
@@ -549,12 +633,18 @@ const App = () => {
       <hr />
 
       {stories.isError && <p>Something went wrong ...</p>}
-
+      <List list={stories.data} onRemoveItem={handleRemoveStory}/>
+      
       {stories.isLoading ? (
         <p>Loading...</p>
       ) : (
-        <List list={stories.data} onRemoveItem={handleRemoveStory}/>
+        <>
+          <StyledButtonHeader onClick={increasePage}>More</StyledButtonHeader>
+          <div ref={observerTarget}></div>
+        </>
       )}
+      
+      
     </StyledContainer>
   )
 }
